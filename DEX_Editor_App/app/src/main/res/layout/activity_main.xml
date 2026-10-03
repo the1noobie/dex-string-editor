@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp"
+    tools:context=".MainActivity">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="APK DEX String Editor"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="For your own app testing only"
+            android:textSize="12sp"
+            android:textColor="#FF6B6B"
+            android:layout_marginBottom="16dp" />
+
+        <Button
+            android:id="@+id/selectApkButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📁 Select APK" />
+
+        <TextView
+            android:id="@+id/apkPathText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="No APK selected"
+            android:textSize="12sp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="16dp"
+            android:textIsSelectable="true" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/classNameInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Class name"
+                android:text="Lcom/android/keyguard/KeyguardUpdateMonitor;"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/methodNameInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Method name"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/registerInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Register (e.g. v1)"
+                android:text="v1"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/oldValueInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Old value (exact string to replace)"
+                android:inputType="text"
+                android:minLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/newValueInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="New value (replacement string)"
+                android:inputType="text"
+                android:minLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <Button
+            android:id="@+id/patchButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="✓ Patch APK"
+            android:textSize="16sp" />
+
+        <Button
+            android:id="@+id/openFileButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📂 Open Patched APK"
+            android:layout_marginTop="8dp"
+            android:enabled="false" />
+
+        <TextView
+            android:id="@+id/resultText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:padding="12dp"
+            android:background="#F5F5F5"
+            android:text="Status: Ready"
+            android:textIsSelectable="true"
+            android:textSize="13sp" />
+
+    </LinearLayout>
+</ScrollView>
