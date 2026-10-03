@@ -9,20 +9,21 @@ import hashlib
 
 USAGE = '''
 Usage:
-  python3 dex_editor_advanced.py quick-edit
+  python3 dex_editor_advanced.py quick-edit [--sign]
   python3 dex_editor_advanced.py --list-classes
   python3 dex_editor_advanced.py --list-methods <class_name>
 
 Quick Edit Mode:
-  Prompts for plaintext values, encrypts them, and patches all 5 locations in the APK.
+  Prompts for plaintext values, encrypts them, and patches the APK.
+  Add --sign to attempt signing with keytool + jarsigner + zipalign if installed.
 
 Examples:
   python3 dex_editor_advanced.py quick-edit
+  python3 dex_editor_advanced.py quick-edit --sign
   python3 dex_editor_advanced.py --list-classes
   python3 dex_editor_advanced.py --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
 '''
 
-# Encryption constants from generate_lic.py
 PASSWORD = "8ClUum9bl2o91dkBySRKUtuCEL38LD1Y"
 ITERATIONS = 128
 KEY_LENGTH = 32
@@ -68,7 +69,6 @@ RCON = [
     0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
 ]
 
-# Patch targets: label, class, register, old hash
 TARGETS = [
     {
         "label": "TID",
@@ -139,6 +139,77 @@ def get_next_output_name():
         if not os.path.exists(output_path):
             return output_path
         counter += 1
+
+
+def has_tool(name):
+    try:
+        res = subprocess.run(["which", name], capture_output=True, timeout=5)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def sign_apk(apk_path):
+    if not has_tool("keytool") or not has_tool("jarsigner") or not has_tool("zipalign"):
+        log("Signing tools not all available.")
+        log("Missing one or more of: keytool, jarsigner, zipalign")
+        log("Skipping signing. Install JDK + Android build tools to enable signing.")
+        return False
+
+    keystore = "/storage/emulated/0/project/my-release-key.keystore"
+    alias = "my-key-alias"
+
+    if not os.path.exists(keystore):
+        storepass = input("Enter keystore password: ").strip()
+        keypass = input("Enter key password (press Enter to reuse keystore password): ").strip()
+        if not keypass:
+            keypass = storepass
+
+        dname = "CN=Android, OU=Android, O=Android, L=Unknown, S=Unknown, C=US"
+        cmd = [
+            "keytool",
+            "-genkey",
+            "-v",
+            "-keystore", keystore,
+            "-storepass", storepass,
+            "-keypass", keypass,
+            "-keyalg", "RSA",
+            "-keysize", "2048",
+            "-validity", "10000",
+            "-alias", alias,
+            "-dname", dname,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            log("Keystore generation failed: " + str(e))
+            return False
+
+    final_path = apk_path.replace(".apk", "_final.apk")
+
+    try:
+        subprocess.run([
+            "jarsigner",
+            "-verbose",
+            "-sigalg", "SHA1withRSA",
+            "-digestalg", "SHA1",
+            "-keystore", keystore,
+            "-storepass", input("Re-enter keystore password: ").strip(),
+            apk_path,
+            alias,
+        ], capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        log("Signing failed: " + str(e))
+        return False
+
+    try:
+        subprocess.run(["zipalign", "-v", "4", apk_path, final_path], capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        log("zipalign failed: " + str(e))
+        return False
+
+    log("[SUCCESS] APK signed and aligned: " + final_path)
+    return True
 
 
 def gf_mul(a, b):
@@ -294,7 +365,7 @@ def parse_methods(smali_file):
             content = f.read().splitlines()
     except Exception as e:
         fail("Error reading " + smali_file + ": " + str(e))
-    
+
     current = None
     for line in content:
         stripped = line.strip()
@@ -354,7 +425,7 @@ def prompt_for_values():
         ("Serial", "Serial (example: 43441a54)"),
         ("Switch passCODE", "Switch passCODE (example: 1990)"),
         ("Bootloop passCODE", "Bootloop passCODE (example: 0911)"),
-        ("Switch-user command", "Switch-user command (example: kmc.sh ;)"),
+        ("Switch-user command", "Switch-user command (example: kmc.sh ;)")
     ]
 
     for key, desc in prompts:
@@ -403,7 +474,6 @@ def quick_edit_all(work_dir, plaintext_values):
             continue
 
         new_hash = encrypted[label]
-
         smali_file = os.path.join(work_dir, class_to_smali(class_name))
         if not os.path.exists(smali_file):
             log("[ERROR] Missing file: " + smali_file)
@@ -424,6 +494,8 @@ def main():
         log(USAGE)
         return 1
 
+    should_sign = "--sign" in sys.argv
+
     if sys.argv[1] == "quick-edit":
         apk_path = find_apk()
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
@@ -434,12 +506,14 @@ def main():
             output = get_next_output_name()
             rebuild(work_dir, output)
             log("[SUCCESS] Patched APK saved to: " + output)
+            if should_sign:
+                sign_apk(output)
         except Exception as e:
             fail("Exception: " + str(e))
         finally:
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
-            except:
+            except Exception:
                 pass
         return 0
 
@@ -455,7 +529,7 @@ def main():
         finally:
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
-            except:
+            except Exception:
                 pass
         return 0
 
@@ -481,7 +555,7 @@ def main():
         finally:
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
-            except:
+            except Exception:
                 pass
         return 0
 
