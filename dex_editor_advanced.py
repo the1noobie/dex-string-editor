@@ -8,16 +8,18 @@ import re
 
 USAGE = '''
 Usage:
-  python3 dex_editor_advanced.py <apk_path> --list-classes
-  python3 dex_editor_advanced.py <apk_path> --list-methods <class_name>
-  python3 dex_editor_advanced.py <apk_path> edit <class_name> <method_name> <register> <old_value> [new_value]
+  python3 dex_editor_advanced.py --list-classes
+  python3 dex_editor_advanced.py --list-methods <class_name>
+  python3 dex_editor_advanced.py edit <class_name> <method_name> <register> <old_value> [new_value]
 
 Examples:
-  python3 dex_editor_advanced.py app.apk --list-classes
-  python3 dex_editor_advanced.py app.apk --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
-  python3 dex_editor_advanced.py app.apk edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash"
-  python3 dex_editor_advanced.py app.apk edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash" "newhash"
+  python3 dex_editor_advanced.py --list-classes
+  python3 dex_editor_advanced.py --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
+  python3 dex_editor_advanced.py edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash"
+  python3 dex_editor_advanced.py edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash" "newhash"
 
+Automatically uses /storage/emulated/0/project/edit.apk as the source APK.
+Output files are saved as edit_1.apk, edit_2.apk, etc.
 If the new value is omitted, the script will prompt for it interactively.
 '''
 
@@ -31,6 +33,23 @@ def ensure_tools():
     for name in ["apktool", "java"]:
         if subprocess.run(["which", name], capture_output=True).returncode != 0:
             fail(f"Required tool not found: {name}. Install it first.")
+
+
+def find_apk():
+    apk_path = "/storage/emulated/0/project/edit.apk"
+    if not os.path.exists(apk_path):
+        fail(f"APK not found at {apk_path}")
+    return apk_path
+
+
+def get_next_output_name():
+    base_dir = "/storage/emulated/0/project"
+    counter = 1
+    while True:
+        output_path = os.path.join(base_dir, f"edit_{counter}.apk")
+        if not os.path.exists(output_path):
+            return output_path
+        counter += 1
 
 
 def class_to_smali(class_name: str) -> str:
@@ -139,11 +158,8 @@ def main():
         print(USAGE)
         return 1
 
-    apk_path = sys.argv[1]
-    if not os.path.exists(apk_path):
-        fail(f"APK not found: {apk_path}")
-
-    if "--list-classes" in sys.argv:
+    if sys.argv[1] == "--list-classes":
+        apk_path = find_apk()
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
             decompile(apk_path, work_dir)
@@ -155,10 +171,11 @@ def main():
             shutil.rmtree(work_dir, ignore_errors=True)
         return 0
 
-    if "--list-methods" in sys.argv:
-        if len(sys.argv) < 4:
+    if sys.argv[1] == "--list-methods":
+        if len(sys.argv) < 3:
             fail("--list-methods requires a class name")
         class_name = sys.argv[2]
+        apk_path = find_apk()
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
             decompile(apk_path, work_dir)
@@ -176,16 +193,17 @@ def main():
             shutil.rmtree(work_dir, ignore_errors=True)
         return 0
 
-    if len(sys.argv) >= 7 and sys.argv[2] == "edit":
-        class_name = sys.argv[3]
-        method_name = sys.argv[4]
-        register = sys.argv[5]
-        old_value = sys.argv[6]
-        new_value = sys.argv[7] if len(sys.argv) > 7 else input("Enter new hash: ").strip()
+    if len(sys.argv) >= 6 and sys.argv[1] == "edit":
+        class_name = sys.argv[2]
+        method_name = sys.argv[3]
+        register = sys.argv[4]
+        old_value = sys.argv[5]
+        new_value = sys.argv[6] if len(sys.argv) > 6 else input("Enter new hash: ").strip()
 
         if not new_value:
             fail("New hash cannot be empty.")
 
+        apk_path = find_apk()
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
             decompile(apk_path, work_dir)
@@ -193,7 +211,7 @@ def main():
             if not os.path.exists(smali_file):
                 fail(f"Class not found: {class_name}")
             edit_const_string(smali_file, method_name, register, old_value, new_value)
-            output = os.path.splitext(apk_path)[0] + ".patched.apk"
+            output = get_next_output_name()
             rebuild(work_dir, output)
             print(f"Patched APK saved to: {output}")
         finally:
