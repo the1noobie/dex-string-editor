@@ -10,12 +10,15 @@ USAGE = '''
 Usage:
   python3 dex_editor_advanced.py <apk_path> --list-classes
   python3 dex_editor_advanced.py <apk_path> --list-methods <class_name>
-  python3 dex_editor_advanced.py <apk_path> edit <class_name> <method_name> <register> <old_value> <new_value>
+  python3 dex_editor_advanced.py <apk_path> edit <class_name> <method_name> <register> <old_value> [new_value]
 
 Examples:
   python3 dex_editor_advanced.py app.apk --list-classes
   python3 dex_editor_advanced.py app.apk --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
+  python3 dex_editor_advanced.py app.apk edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash"
   python3 dex_editor_advanced.py app.apk edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash" "newhash"
+
+If the new value is omitted, the script will prompt for it interactively.
 '''
 
 
@@ -173,12 +176,15 @@ def main():
             shutil.rmtree(work_dir, ignore_errors=True)
         return 0
 
-    if len(sys.argv) >= 8 and sys.argv[2] == "edit":
+    if len(sys.argv) >= 7 and sys.argv[2] == "edit":
         class_name = sys.argv[3]
         method_name = sys.argv[4]
         register = sys.argv[5]
         old_value = sys.argv[6]
-        new_value = sys.argv[7]
+        new_value = sys.argv[7] if len(sys.argv) > 7 else input("Enter new hash: ").strip()
+
+        if not new_value:
+            fail("New hash cannot be empty.")
 
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
