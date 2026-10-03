@@ -1,299 +1,202 @@
 #!/usr/bin/env python3
-"""
-Advanced DEX String Editor
-Edit const-string values in classes.dex by class name, method, and register.
-Works with smali/baksmali for reliable patching.
-"""
-
 import os
 import sys
 import subprocess
 import tempfile
 import shutil
 import re
-from pathlib import Path
 
-USAGE = """
+USAGE = '''
 Usage:
-  python dex_editor_advanced.py <apk_path> --list-classes
-  python dex_editor_advanced.py <apk_path> --list-methods <class_name>
-  python dex_editor_advanced.py <apk_path> edit <class_name> <method_name> <register> <new_value>
+  python3 dex_editor_advanced.py <apk_path> --list-classes
+  python3 dex_editor_advanced.py <apk_path> --list-methods <class_name>
+  python3 dex_editor_advanced.py <apk_path> edit <class_name> <method_name> <register> <old_value> <new_value>
 
 Examples:
-  # List all classes
-  python dex_editor_advanced.py app.apk --list-classes
+  python3 dex_editor_advanced.py app.apk --list-classes
+  python3 dex_editor_advanced.py app.apk --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
+  python3 dex_editor_advanced.py app.apk edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash" "newhash"
+'''
 
-  # List methods in a specific class
-  python dex_editor_advanced.py app.apk --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
-
-  # Edit a const-string value
-  python dex_editor_advanced.py app.apk edit \\
-    Lcom/android/keyguard/KeyguardUpdateMonitor; \\
-    myMethod \\
-    v1 \\
-    "9a047ddc3d5ae1dd3844fe805c6e580c81ba68a9310a2b7751f5d10901b1d9d9" \\
-    "MY_NEW_HASH_HERE"
-
-  # Replace multiple hashes
-  python dex_editor_advanced.py app.apk edit \\
-    Lcom/android/keyguard/KeyguardAbsKeyInputView; \\
-    onKey \\
-    v12 \\
-    "2d1727b2f7b9a787fad689cde481e032" \\
-    "NEW_HASH_VALUE"
-
-Requirements:
-  - apktool
-  - Java 8+
-"""
 
 def fail(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
-def check_tool(tool_name):
-    """Check if a tool is installed."""
-    result = subprocess.run(["which", tool_name], capture_output=True)
-    return result.returncode == 0
 
 def ensure_tools():
-    """Ensure required tools are available."""
-    if not check_tool("apktool"):
-        fail("apktool not found. Install it: sudo apt-get install apktool (or brew install apktool)")
-    if not check_tool("java"):
-        fail("Java not found. Install Java 8+")
+    for name in ["apktool", "java"]:
+        if subprocess.run(["which", name], capture_output=True).returncode != 0:
+            fail(f"Required tool not found: {name}. Install it first.")
 
-def decompile_apk(apk_path, output_dir):
-    """Decompile APK using apktool."""
-    print(f"Decompiling {apk_path}...")
-    result = subprocess.run(
-        ["apktool", "d", "-f", apk_path, "-o", output_dir],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        fail(f"apktool decompile failed:\n{result.stderr}")
-    print(f"Decompiled to {output_dir}")
 
-def recompile_apk(work_dir, output_apk):
-    """Recompile APK using apktool."""
-    print(f"Recompiling APK...")
-    result = subprocess.run(
-        ["apktool", "b", "-f", work_dir, "-o", output_apk],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        fail(f"apktool build failed:\n{result.stderr}")
-    print(f"Recompiled APK: {output_apk}")
+def class_to_smali(class_name: str) -> str:
+    class_name = class_name.strip()
+    if not class_name.startswith("L") or not class_name.endswith(";"):
+        fail(f"Invalid class name format: {class_name}")
+    rel = class_name[1:-1]
+    return os.path.join("smali", rel + ".smali")
+
+
+def run(cmd):
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        fail(f"Command failed: {' '.join(cmd)}\n{res.stderr.strip()}")
+    return res.stdout
+
+
+def decompile(apk_path, work_dir):
+    print(f"[1/3] Decompiling {apk_path}...")
+    run(["apktool", "d", "-f", apk_path, "-o", work_dir])
+
+
+def rebuild(work_dir, output_apk):
+    print(f"[3/3] Rebuilding APK to {output_apk}...")
+    run(["apktool", "b", "-f", work_dir, "-o", output_apk])
+
 
 def list_classes(work_dir):
-    """List all smali classes in the decompiled APK."""
-    smali_dir = os.path.join(work_dir, "smali")
-    if not os.path.exists(smali_dir):
-        fail(f"smali directory not found in {work_dir}")
-    
-    classes = []
-    for root, dirs, files in os.walk(smali_dir):
-        for file in files:
-            if file.endswith(".smali"):
-                # Convert path to class name
-                rel_path = os.path.relpath(os.path.join(root, file), smali_dir)
-                class_name = "L" + rel_path.replace("/", "/").replace(".smali", ";")
-                # Normalize slashes
-                class_name = class_name.replace("\\", "/")
-                classes.append(class_name)
-    
-    return sorted(classes)
+    out = []
+    for root, _, files in os.walk(os.path.join(work_dir, "smali")):
+        for f in files:
+            if f.endswith(".smali"):
+                rel = os.path.relpath(os.path.join(root, f), os.path.join(work_dir, "smali"))
+                cls = "L" + rel.replace(os.sep, "/")[:-len(".smali")] + ";"
+                out.append(cls)
+    return sorted(out)
 
-def smali_path_from_class(class_name):
-    """Convert class name Lcom/foo/Bar; to smali path."""
-    # Remove leading L and trailing ;
-    path = class_name.lstrip("L").rstrip(";")
-    # Replace / with os.sep
-    path = path.replace("/", os.sep)
-    return "smali" + os.sep + path + ".smali"
 
-def parse_smali_file(smali_path):
-    """Parse smali file and extract method names and instructions."""
-    with open(smali_path, "r") as f:
-        content = f.read()
-    
-    methods = {}
-    current_method = None
-    
-    for line in content.split("\n"):
-        line = line.strip()
-        
-        # Detect method definition
-        match = re.match(r'\.method\s+(?:public|private|protected|static)?\s*(\w+)\(.*?\).*', line)
-        if match:
-            current_method = match.group(1)
-            methods[current_method] = []
-        
-        # Collect const-string instructions
-        if current_method:
-            methods[current_method].append(line)
-    
+def parse_methods(smali_file):
+    methods = []
+    content = open(smali_file, "r", encoding="utf-8").read().splitlines()
+    current = None
+    for line in content:
+        stripped = line.strip()
+        if stripped.startswith(".method"):
+            current = stripped
+            methods.append({"signature": stripped, "lines": []})
+            continue
+        if current is not None:
+            methods[-1]["lines"].append(stripped)
+        if stripped.startswith(".end method"):
+            current = None
     return methods
 
-def find_const_string_in_method(method_lines, register, target_string=None):
-    """
-    Find const-string instruction in a method.
-    Returns (line_index, instruction) or None.
-    """
+
+def find_const_string_in_method(method_lines, register, old_value=None):
     for idx, line in enumerate(method_lines):
-        # Match: const-string/jumbo v1, "string_value"
-        match = re.match(r'const-string(?:/jumbo)?\s+' + re.escape(register) + r',\s*"([^"]*)"', line)
-        if match:
-            string_value = match.group(1)
-            if target_string is None or string_value == target_string:
-                return idx, line, string_value
-    
+        match = re.match(rf'const-string(?:/jumbo)?\s+{re.escape(register)}\s*,\s*"([^"]*)"', line)
+        if not match:
+            continue
+        current = match.group(1)
+        if old_value is None or current == old_value:
+            return idx, current
     return None
 
-def edit_const_string(smali_path, method_name, register, old_value, new_value):
-    """Edit a const-string instruction in a smali file."""
-    with open(smali_path, "r") as f:
-        lines = f.readlines()
-    
+
+def edit_const_string(smali_file, method_name, register, old_value, new_value):
+    lines = open(smali_file, "r", encoding="utf-8").read().splitlines(True)
     in_method = False
-    method_start = None
-    method_end = None
+    method_found = False
     found = False
-    
+
     for idx, line in enumerate(lines):
-        # Detect method start
-        if re.match(r'\s*\.method\s+', line) and method_name in line:
+        stripped = line.strip()
+        if stripped.startswith(".method") and method_name in stripped:
             in_method = True
-            method_start = idx
-        
-        # Detect method end
-        if in_method and re.match(r'\s*\.end method', line):
-            method_end = idx
-            break
-        
-        # Find and replace const-string
+            method_found = True
+            continue
+        if in_method and stripped.startswith(".end method"):
+            in_method = False
+            continue
         if in_method:
-            match = re.match(
-                r'(\s*)const-string(?:/jumbo)?\s+' + re.escape(register) + r',\s*"([^"]*)"',
-                line
-            )
+            match = re.match(rf'(\s*)const-string(?:/jumbo)?\s+{re.escape(register)}\s*,\s*"([^"]*)"', stripped)
             if match:
-                indent = match.group(1)
-                current_value = match.group(2)
-                
-                if current_value == old_value:
-                    # Replace with new value
-                    new_line = f'{indent}const-string/jumbo {register}, "{new_value}"\n'
-                    lines[idx] = new_line
+                current = match.group(2)
+                if current == old_value:
+                    indent = match.group(1)
+                    lines[idx] = f'{indent}const-string/jumbo {register}, "{new_value}"\n'
                     found = True
-                    print(f"  Replaced in line {idx + 1}: '{old_value}' -> '{new_value}'")
-    
+                    print(f"[OK] Replaced {old_value} -> {new_value}")
+                    break
+
+    if not method_found:
+        fail(f"Method not found: {method_name}")
     if not found:
-        fail(f"const-string {register} with value '{old_value}' not found in {method_name}")
-    
-    with open(smali_path, "w") as f:
+        fail(f"const-string for register {register} with value {old_value} not found in {method_name}")
+
+    with open(smali_file, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
+
 def main():
+    ensure_tools()
+
     if len(sys.argv) < 2:
         print(USAGE)
-        sys.exit(1)
-    
-    ensure_tools()
-    
+        return 1
+
     apk_path = sys.argv[1]
     if not os.path.exists(apk_path):
         fail(f"APK not found: {apk_path}")
-    
-    # List classes
+
     if "--list-classes" in sys.argv:
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
-            decompile_apk(apk_path, work_dir)
+            decompile(apk_path, work_dir)
             classes = list_classes(work_dir)
             for cls in classes:
                 print(cls)
             print(f"\nTotal classes: {len(classes)}")
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
-        return
-    
-    # List methods in a class
+        return 0
+
     if "--list-methods" in sys.argv:
         if len(sys.argv) < 4:
-            fail("--list-methods requires class name")
-        class_name = sys.argv[3]
-        
+            fail("--list-methods requires a class name")
+        class_name = sys.argv[2]
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
-            decompile_apk(apk_path, work_dir)
-            smali_file = os.path.join(work_dir, smali_path_from_class(class_name))
-            
+            decompile(apk_path, work_dir)
+            smali_file = os.path.join(work_dir, class_to_smali(class_name))
             if not os.path.exists(smali_file):
                 fail(f"Class not found: {class_name}")
-            
-            methods = parse_smali_file(smali_file)
-            print(f"Methods in {class_name}:")
-            for method_name, lines in methods.items():
-                # Find const-string instructions
-                const_strings = []
-                for line in lines:
-                    match = re.match(r'const-string(?:/jumbo)?\s+(\w+),\s*"([^"]*)"', line)
-                    if match:
-                        register, value = match.group(1), match.group(2)
-                        const_strings.append((register, value))
-                
-                if const_strings:
-                    print(f"\n  {method_name}():")
-                    for register, value in const_strings:
-                        print(f"    {register}: {value}")
+            for method in parse_methods(smali_file):
+                sig = method['signature']
+                if "const-string" in "\n".join(method['lines']):
+                    print(sig)
+                    for line in method['lines']:
+                        if "const-string" in line:
+                            print(f"  {line}")
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
-        return
-    
-    # Edit a const-string
-    if sys.argv[2:3] == ["edit"]:
-        if len(sys.argv) < 7:
-            print("Usage: dex_editor_advanced.py <apk> edit <class> <method> <register> <old_value> <new_value>")
-            sys.exit(1)
-        
+        return 0
+
+    if len(sys.argv) >= 8 and sys.argv[2] == "edit":
         class_name = sys.argv[3]
         method_name = sys.argv[4]
         register = sys.argv[5]
         old_value = sys.argv[6]
-        new_value = sys.argv[7] if len(sys.argv) > 7 else None
-        
-        if new_value is None:
-            fail("new_value is required")
-        
+        new_value = sys.argv[7]
+
         work_dir = tempfile.mkdtemp(prefix="dex-edit-")
         try:
-            # Decompile
-            decompile_apk(apk_path, work_dir)
-            
-            # Find smali file
-            smali_file = os.path.join(work_dir, smali_path_from_class(class_name))
+            decompile(apk_path, work_dir)
+            smali_file = os.path.join(work_dir, class_to_smali(class_name))
             if not os.path.exists(smali_file):
                 fail(f"Class not found: {class_name}")
-            
-            print(f"Editing {class_name}.{method_name}()...")
-            
-            # Edit the smali file
             edit_const_string(smali_file, method_name, register, old_value, new_value)
-            
-            # Recompile
-            output_apk = apk_path.replace(".apk", ".edited.apk")
-            recompile_apk(work_dir, output_apk)
-            print(f"✓ Successfully created: {output_apk}")
-        
+            output = os.path.splitext(apk_path)[0] + ".patched.apk"
+            rebuild(work_dir, output)
+            print(f"Patched APK saved to: {output}")
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
-        
-        return
-    
+        return 0
+
     print(USAGE)
+    return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
