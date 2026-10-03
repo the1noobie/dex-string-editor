@@ -18,10 +18,12 @@ Examples:
   python3 dex_editor_advanced.py edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash"
   python3 dex_editor_advanced.py edit Lcom/android/keyguard/KeyguardUpdateMonitor; myMethod v1 "oldhash" "newhash"
 
-Automatically uses /storage/emulated/0/project/edit.apk as the source APK.
-Output files are saved as edit_1.apk, edit_2.apk, etc.
-If the new value is omitted, the script will prompt for it interactively.
+If the new value is omitted, the script will generate a license hash from generate_lic.py
+and prompt you to select which generated value to use.
 '''
+
+LICENSE_SCRIPT = "/storage/emulated/0/project/generate_lic.py"
+LICENSE_OUTPUT = "/storage/emulated/0/generated_lic.txt"
 
 
 def fail(msg):
@@ -50,6 +52,65 @@ def get_next_output_name():
         if not os.path.exists(output_path):
             return output_path
         counter += 1
+
+
+def generate_license_values():
+    if not os.path.exists(LICENSE_SCRIPT):
+        fail(f"License generator not found: {LICENSE_SCRIPT}")
+
+    print("[1/2] Generating license values from generate_lic.py...")
+    res = subprocess.run([sys.executable, LICENSE_SCRIPT], capture_output=True, text=True)
+    if res.returncode != 0:
+        fail(f"License generator failed: {res.stderr.strip() or res.stdout.strip()}")
+
+    if not os.path.exists(LICENSE_OUTPUT):
+        fail(f"License output file not created: {LICENSE_OUTPUT}")
+
+    values = {}
+    current = None
+    with open(LICENSE_OUTPUT, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line.startswith("[") and line.endswith("]"):
+                current = line[1:-1].strip()
+                continue
+            if current and line.startswith("Ciphertext:"):
+                values[current] = line.split("Ciphertext:", 1)[1].strip()
+                current = None
+
+    if not values:
+        fail(f"No generated hashes found in {LICENSE_OUTPUT}")
+
+    return values
+
+
+def choose_license_value(values):
+    options = list(values.keys())
+    print("Generated license values:")
+    for idx, key in enumerate(options, 1):
+        print(f"  {idx}. {key}")
+
+    while True:
+        choice = input("Select which generated value to use (number or name): ").strip()
+        if not choice:
+            fail("No selection made.")
+
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(options):
+                return values[options[idx - 1]]
+        except ValueError:
+            pass
+
+        if choice in values:
+            return values[choice]
+
+        print("Invalid selection. Choose a number or one of the labels above.")
+
+
+def get_new_value_from_license():
+    values = generate_license_values()
+    return choose_license_value(values)
 
 
 def class_to_smali(class_name: str) -> str:
@@ -198,7 +259,7 @@ def main():
         method_name = sys.argv[3]
         register = sys.argv[4]
         old_value = sys.argv[5]
-        new_value = sys.argv[6] if len(sys.argv) > 6 else input("Enter new hash: ").strip()
+        new_value = sys.argv[6] if len(sys.argv) > 6 else get_new_value_from_license()
 
         if not new_value:
             fail("New hash cannot be empty.")
