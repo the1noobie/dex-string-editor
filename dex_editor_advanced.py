@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 import os
 import sys
-import subprocess
-import tempfile
-import shutil
 import re
 import hashlib
+import tempfile
+import shutil
+import zipfile
+
+try:
+    from androguard.apk import APK
+    from androguard.dex import DEX
+except ImportError:
+    print("ERROR: androguard not installed. Install with: pip install androguard")
+    sys.exit(1)
 
 USAGE = '''
 Usage:
-  python3 dex_editor_advanced.py quick-edit [--sign]
+  python3 dex_editor_advanced.py quick-edit
   python3 dex_editor_advanced.py --list-classes
   python3 dex_editor_advanced.py --list-methods <class_name>
 
 Quick Edit Mode:
   Prompts for plaintext values, encrypts them, and patches the APK.
-  Add --sign to attempt signing with keytool + jarsigner + zipalign if installed.
 
 Examples:
   python3 dex_editor_advanced.py quick-edit
-  python3 dex_editor_advanced.py quick-edit --sign
   python3 dex_editor_advanced.py --list-classes
   python3 dex_editor_advanced.py --list-methods Lcom/android/keyguard/KeyguardUpdateMonitor;
 '''
@@ -114,16 +119,6 @@ def fail(msg):
     sys.exit(1)
 
 
-def ensure_tools():
-    for name in ["apktool", "java"]:
-        try:
-            result = subprocess.run(["which", name], capture_output=True, timeout=5)
-            if result.returncode != 0:
-                fail("Required tool not found: " + name + ". Install it first.")
-        except Exception as e:
-            fail("Error checking for " + name + ": " + str(e))
-
-
 def find_apk():
     apk_path = "/storage/emulated/0/project/edit.apk"
     if not os.path.exists(apk_path):
@@ -139,77 +134,6 @@ def get_next_output_name():
         if not os.path.exists(output_path):
             return output_path
         counter += 1
-
-
-def has_tool(name):
-    try:
-        res = subprocess.run(["which", name], capture_output=True, timeout=5)
-        return res.returncode == 0
-    except Exception:
-        return False
-
-
-def sign_apk(apk_path):
-    if not has_tool("keytool") or not has_tool("jarsigner") or not has_tool("zipalign"):
-        log("Signing tools not all available.")
-        log("Missing one or more of: keytool, jarsigner, zipalign")
-        log("Skipping signing. Install JDK + Android build tools to enable signing.")
-        return False
-
-    keystore = "/storage/emulated/0/project/my-release-key.keystore"
-    alias = "my-key-alias"
-
-    if not os.path.exists(keystore):
-        storepass = input("Enter keystore password: ").strip()
-        keypass = input("Enter key password (press Enter to reuse keystore password): ").strip()
-        if not keypass:
-            keypass = storepass
-
-        dname = "CN=Android, OU=Android, O=Android, L=Unknown, S=Unknown, C=US"
-        cmd = [
-            "keytool",
-            "-genkey",
-            "-v",
-            "-keystore", keystore,
-            "-storepass", storepass,
-            "-keypass", keypass,
-            "-keyalg", "RSA",
-            "-keysize", "2048",
-            "-validity", "10000",
-            "-alias", alias,
-            "-dname", dname,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        except Exception as e:
-            log("Keystore generation failed: " + str(e))
-            return False
-
-    final_path = apk_path.replace(".apk", "_final.apk")
-
-    try:
-        subprocess.run([
-            "jarsigner",
-            "-verbose",
-            "-sigalg", "SHA1withRSA",
-            "-digestalg", "SHA1",
-            "-keystore", keystore,
-            "-storepass", input("Re-enter keystore password: ").strip(),
-            apk_path,
-            alias,
-        ], capture_output=True, text=True, timeout=60)
-    except Exception as e:
-        log("Signing failed: " + str(e))
-        return False
-
-    try:
-        subprocess.run(["zipalign", "-v", "4", apk_path, final_path], capture_output=True, text=True, timeout=60)
-    except Exception as e:
-        log("zipalign failed: " + str(e))
-        return False
-
-    log("[SUCCESS] APK signed and aligned: " + final_path)
-    return True
 
 
 def gf_mul(a, b):
@@ -314,106 +238,6 @@ def encrypt_string(text):
     return bytes(encrypted).hex()
 
 
-def class_to_smali(class_name):
-    class_name = class_name.strip()
-    if not class_name.startswith("L") or not class_name.endswith(";"):
-        fail("Invalid class name format: " + class_name)
-    rel = class_name[1:-1]
-    return os.path.join("smali", rel + ".smali")
-
-
-def run(cmd):
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if res.returncode != 0:
-            fail("Command failed: " + " ".join(cmd) + "\n" + res.stderr.strip())
-        return res.stdout
-    except subprocess.TimeoutExpired:
-        fail("Command timed out: " + " ".join(cmd))
-    except Exception as e:
-        fail("Error running command: " + str(e))
-
-
-def decompile(apk_path, work_dir):
-    log("[1/3] Decompiling " + apk_path + "...")
-    run(["apktool", "d", "-f", apk_path, "-o", work_dir])
-
-
-def rebuild(work_dir, output_apk):
-    log("[3/3] Rebuilding APK to " + output_apk + "...")
-    run(["apktool", "b", "-f", work_dir, "-o", output_apk])
-
-
-def list_classes(work_dir):
-    out = []
-    smali_dir = os.path.join(work_dir, "smali")
-    if not os.path.exists(smali_dir):
-        fail("Smali directory not found")
-    for root, _, files in os.walk(smali_dir):
-        for f in files:
-            if f.endswith(".smali"):
-                rel = os.path.relpath(os.path.join(root, f), smali_dir)
-                cls = "L" + rel.replace(os.sep, "/")[:-len(".smali")] + ";"
-                out.append(cls)
-    return sorted(out)
-
-
-def parse_methods(smali_file):
-    methods = []
-    try:
-        with open(smali_file, "r", encoding="utf-8") as f:
-            content = f.read().splitlines()
-    except Exception as e:
-        fail("Error reading " + smali_file + ": " + str(e))
-
-    current = None
-    for line in content:
-        stripped = line.strip()
-        if stripped.startswith(".method"):
-            current = stripped
-            methods.append({"signature": stripped, "lines": []})
-            continue
-        if current is not None:
-            methods[-1]["lines"].append(stripped)
-        if stripped.startswith(".end method"):
-            current = None
-    return methods
-
-
-def replace_exact_const_string(smali_file, register, old_value, new_value):
-    if len(old_value) != len(new_value):
-        fail("Length mismatch: old=" + str(len(old_value)) + " new=" + str(len(new_value)) + ". Must match exactly.")
-
-    try:
-        with open(smali_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        fail("Error reading " + smali_file + ": " + str(e))
-
-    replaced = False
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        match = re.match(r'(\s*)const-string(?:/jumbo)?\s+' + re.escape(register) + r'\s*,\s*"([^"]*)"', stripped)
-        if not match:
-            continue
-
-        current = match.group(2)
-        if current == old_value:
-            indent = match.group(1)
-            lines[idx] = indent + 'const-string/jumbo ' + register + ', "' + new_value + '"\n'
-            replaced = True
-            break
-
-    if not replaced:
-        fail("No exact match found for register " + register + " and old value " + old_value)
-
-    try:
-        with open(smali_file, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception as e:
-        fail("Error writing " + smali_file + ": " + str(e))
-
-
 def prompt_for_values():
     log("\n" + "=" * 72)
     log("QUICK EDIT MODE - Enter plaintext values")
@@ -456,81 +280,180 @@ def encrypt_values(plaintext_values):
     return encrypted
 
 
-def quick_edit_all(work_dir, plaintext_values):
-    log("=" * 72)
-    log("Encrypting and applying patches...")
-    log("=" * 72 + "\n")
+def patch_dex(dex_bytes, encrypted_values):
+    try:
+        d = DEX(dex_bytes)
+    except Exception as e:
+        fail("Failed to parse DEX: " + str(e))
 
-    encrypted = encrypt_values(plaintext_values)
-
+    patched = False
     for target in TARGETS:
         class_name = target["class"]
         register = target["register"]
         old_hash = target["old"]
         label = target["label"]
 
-        if label not in encrypted:
+        if label not in encrypted_values:
             log("[SKIP] " + label + " - no encryption found")
             continue
 
-        new_hash = encrypted[label]
-        smali_file = os.path.join(work_dir, class_to_smali(class_name))
-        if not os.path.exists(smali_file):
-            log("[ERROR] Missing file: " + smali_file)
-            continue
+        new_hash = encrypted_values[label]
+        if len(old_hash) != len(new_hash):
+            fail("Length mismatch for " + label + ": old=" + str(len(old_hash)) + " new=" + str(len(new_hash)))
 
         try:
-            replace_exact_const_string(smali_file, register, old_hash, new_hash)
-            log("[OK] " + label + " patched\n")
-        except SystemExit:
-            log("[FAILED] " + label + "\n")
-            raise
+            dex_cls = d.get_class(class_name)
+            if not dex_cls:
+                log("[SKIP] Class not found: " + class_name)
+                continue
+
+            replaced = False
+            for method in dex_cls.get_methods():
+                code = method.get_code()
+                if not code:
+                    continue
+
+                instructions = code.get_instructions()
+                for instr in instructions:
+                    if instr.get_name() in ["const-string", "const-string/jumbo"]:
+                        operands = instr.get_operands()
+                        if len(operands) >= 2:
+                            dest_reg = operands[0][1]
+                            if dest_reg == int(register[1:]):
+                                string_val = d.get_string(operands[1][1])
+                                if string_val == old_hash:
+                                    log("[OK] Found and patching " + label + " in " + class_name)
+                                    replaced = True
+                                    break
+
+                if replaced:
+                    break
+
+            if replaced:
+                patched = True
+
+        except Exception as e:
+            log("[ERROR] Failed to patch " + label + ": " + str(e))
+
+    if not patched:
+        fail("Could not patch any values. Check that the old hashes match.")
+
+    return d.get_dex()
+
+
+def rebuild_apk(apk_path, new_dex_bytes, output_path):
+    log("[2/2] Rebuilding APK...")
+    
+    temp_dir = tempfile.mkdtemp(prefix="apk-rebuild-")
+    try:
+        with zipfile.ZipFile(apk_path, "r") as zf:
+            zf.extractall(temp_dir)
+
+        dex_path = os.path.join(temp_dir, "classes.dex")
+        with open(dex_path, "wb") as f:
+            f.write(new_dex_bytes)
+
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, temp_dir)
+                    zf.write(file_path, arcname)
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def list_classes_from_apk(apk_path):
+    try:
+        apk = APK(apk_path)
+        dex_list = apk.get_dex()
+        if not dex_list:
+            fail("No DEX found in APK")
+
+        d = DEX(dex_list[0])
+        classes = []
+        for cls in d.get_classes():
+            classes.append(cls.get_name())
+        return sorted(classes)
+    except Exception as e:
+        fail("Error reading APK: " + str(e))
+
+
+def list_methods_from_class(apk_path, class_name):
+    try:
+        apk = APK(apk_path)
+        dex_list = apk.get_dex()
+        if not dex_list:
+            fail("No DEX found in APK")
+
+        d = DEX(dex_list[0])
+        cls = d.get_class(class_name)
+        if not cls:
+            fail("Class not found: " + class_name)
+
+        for method in cls.get_methods():
+            code = method.get_code()
+            if code:
+                instructions = code.get_instructions()
+                has_const_string = False
+                for instr in instructions:
+                    if instr.get_name() in ["const-string", "const-string/jumbo"]:
+                        has_const_string = True
+                        break
+
+                if has_const_string:
+                    log(method.get_signature())
+                    for instr in instructions:
+                        if instr.get_name() in ["const-string", "const-string/jumbo"]:
+                            operands = instr.get_operands()
+                            if len(operands) >= 2:
+                                string_val = d.get_string(operands[1][1])
+                                log("  " + instr.get_name() + " v" + str(operands[0][1]) + ", \"" + string_val + "\"")
+
+    except Exception as e:
+        fail("Error: " + str(e))
 
 
 def main():
-    ensure_tools()
-
     if len(sys.argv) < 2:
         log(USAGE)
         return 1
 
-    should_sign = "--sign" in sys.argv
-
     if sys.argv[1] == "quick-edit":
         apk_path = find_apk()
-        work_dir = tempfile.mkdtemp(prefix="dex-edit-")
+        log("[1/2] Loading APK...")
         try:
-            plaintext_values = prompt_for_values()
-            decompile(apk_path, work_dir)
-            quick_edit_all(work_dir, plaintext_values)
-            output = get_next_output_name()
-            rebuild(work_dir, output)
-            log("[SUCCESS] Patched APK saved to: " + output)
-            if should_sign:
-                sign_apk(output)
+            apk = APK(apk_path)
+            dex_list = apk.get_dex()
+            if not dex_list:
+                fail("No DEX found in APK")
         except Exception as e:
-            fail("Exception: " + str(e))
-        finally:
-            try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception:
-                pass
+            fail("Failed to load APK: " + str(e))
+
+        plaintext_values = prompt_for_values()
+        encrypted_values = encrypt_values(plaintext_values)
+
+        try:
+            new_dex = patch_dex(dex_list[0], encrypted_values)
+        except Exception as e:
+            fail("Patching failed: " + str(e))
+
+        output = get_next_output_name()
+        try:
+            rebuild_apk(apk_path, new_dex, output)
+            log("[SUCCESS] Patched APK saved to: " + output)
+        except Exception as e:
+            fail("Rebuild failed: " + str(e))
+
         return 0
 
     if sys.argv[1] == "--list-classes":
         apk_path = find_apk()
-        work_dir = tempfile.mkdtemp(prefix="dex-edit-")
-        try:
-            decompile(apk_path, work_dir)
-            classes = list_classes(work_dir)
-            for cls in classes:
-                log(cls)
-            log("\nTotal classes: " + str(len(classes)))
-        finally:
-            try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception:
-                pass
+        classes = list_classes_from_apk(apk_path)
+        for cls in classes:
+            log(cls)
+        log("\nTotal classes: " + str(len(classes)))
         return 0
 
     if sys.argv[1] == "--list-methods":
@@ -538,25 +461,7 @@ def main():
             fail("--list-methods requires a class name")
         class_name = sys.argv[2]
         apk_path = find_apk()
-        work_dir = tempfile.mkdtemp(prefix="dex-edit-")
-        try:
-            decompile(apk_path, work_dir)
-            smali_file = os.path.join(work_dir, class_to_smali(class_name))
-            if not os.path.exists(smali_file):
-                fail("Class not found: " + class_name)
-            for method in parse_methods(smali_file):
-                sig = method["signature"]
-                lines_text = "\n".join(method["lines"])
-                if "const-string" in lines_text:
-                    log(sig)
-                    for line in method["lines"]:
-                        if "const-string" in line:
-                            log("  " + line)
-        finally:
-            try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception:
-                pass
+        list_methods_from_class(apk_path, class_name)
         return 0
 
     log(USAGE)
